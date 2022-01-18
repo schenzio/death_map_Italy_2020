@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <script src="d3.js"></script>
+        <meta name="viewport" content="initial-scale=1.0, width=device-width" /> 
+        <script src="topojson.v1.min.js"></script>
+        <style>
+            @media screen and (min-width: 250px) {
+                #controller{
+                    top: 700px;
+                }
+            }
+            @media screen and (min-width: 480px) {
+                #controller{
+                    top: 270px;
+                    right: 8%;
+                    text-align: right;
+                    font-weight: bold;
+                }
+            }
+            @media screen and (min-width: 720px) and (orientation: landscape) {
+                #controller{
+                    top: 225px;
+                    right: 16%;
+                }
+            }
+            #container {
+                width: 100%;
+            }
+            #tooltip {
+                border: solid 1px black;
+                padding: 5px;
+                display: none;
+                background-color: white;
+                position: absolute;
+            }
+            input{
+                padding: 2px;
+                background: gainsboro;
+            }
+            input:hover{
+                background-color:ivory;
+            }
+            #controller{
+                position: absolute;
+            }
+            text {
+                font-size: 1rem;
+                font-family: sans-serif;
+            }
+            #legendAxis text {
+                font-size: 0.7rem;
+            }
+            
+            #source{
+                position: absolute;
+                top: 796px;
+                padding-bottom: 2px;
+            }
+            #tooltip{
+                padding: 5px;
+                border-radius: 3px;
+                resize: none;
+            }
+
+        </style>
+    </head>
+    <body>
+        <svg id="container" width=500 height=700 viewBox="0 0 500 700" preserveAspectratio="xMinYMin">
+            <g id="body">
+            </g>
+            <g id="legend"></g>
+            <g id="legendAxis"></g>
+        </svg>
+        <div id="controller">
+           <!-- <label for="birthday">Scegli un giorno:</label>
+            <input type="date" id="day" name="day" min="2020-01-01" max="2020-12-31" />-->
+        </div>
+        <textarea id="tooltip" rows=10 cols=35 readonly>
+        </textarea>
+        <a href="mapVs2.html">Cambia scala colore</a>
+        <div id="source"><b>Fonte</b>: 
+            <a href="https://www.istat.it/it/archivio/240401">
+            Istat</a>
+        </div>
+    </body>
+    <script>
+        let body = d3.select("#body");
+        let container = d3.select("#container");
+        let controller = d3.select("#controller");
+        Promise.all([ 
+            d3.json("comuni-1.topojson"),
+            d3.csv("output.csv")
+        ])
+        .then(showData);
+        function showData(dataSources){
+            let mapInfo = dataSources[0];
+            let data = dataSources[1];       
+            let districts = topojson.feature(mapInfo, mapInfo.objects.Com01012020_WGS84).features;
+            let exec = 0;
+            let stop = false;
+            let currentDay = "";
+            let domain = [-100, 0, 800];
+            //creo pulsanti per la gestione dell'animazione e un box che mostra il mese corrente
+            controller.append("div")
+                .attr("id", "dayBox")
+            controller.append("input")
+                .attr("type", "image")
+                .attr("src", "play.svg")
+                .on("click", ()=> {stop= false; timeout()})
+            controller.append("input")
+                .attr("type", "image")
+                .attr("src", "stop.svg")
+                .on("click", ()=>stop=true)
+            controller.append("input")
+                .attr("type", "image")
+                .attr("src", "replay.svg")
+                .on("click", ()=> {exec=0; stop=false; timeout()})
+            
+            let dayList = data.reduce((dayList, d)=>{
+                if (!(dayList.includes(Number(d.GE)))){
+                    dayList.push(Number(d.GE))
+                }
+                return dayList
+            }, [])
+            dayList = dayList.sort((a,b)=>{
+                return d3.ascending(a, b)
+            })
+            //console.log(dayList)
+
+            //creo un dizionario a partire dal csv, in cui le chiavi sono i codici dei comuni e i valori sono le informazioni sui 
+            //decessi in quel comune (i decessi giornalieri del 2020 sono salvati come dizionario)
+            let result = data.reduce((result, d) => {
+                let currentData = result[d.COD_PROVCOM] || {
+                    "PRO_COM": d.COD_PROVCOM,
+                    "var":{},
+                    "d_2020":{},
+                    "avg_d":{}
+                }
+                let day = Number(d.GE);
+                currentData["var"][day] = Number(d.delta);
+                currentData["d_2020"][day] = Number(d.T_20);
+                currentData["avg_d"][day] = Number(d.AVG);
+                result[d.COD_PROVCOM] = currentData;
+                return result
+            }, {})
+            //trasformo il dizionario in lista e ordino il topojson dei comuni
+            result = Object.keys(result).map(key => result[key])
+            
+            //aggiungo dei valori zero per ogni giorno in cui non ci sono stati decessi
+            for (let x in result){ 
+                let days = Object.keys(result[x].var);
+                for (let y of dayList){
+                    if(!(days.includes(String(y)))){
+                        result[x].var[y] = 0;
+                    }
+                }
+            }
+            //console.log(result)
+            districts = districts.sort((a,b)=>{
+                return d3.ascending(a.properties.PRO_COM, b.properties.PRO_COM)
+            })
+            //unisco i dati dei decessi al topojson
+            districts = districts.map(d=>{
+                for (let row of result){
+                    if (d.properties.PRO_COM==row.PRO_COM){
+                        Object.assign(d.properties, row)
+                    }
+                }
+                return d;
+            })
+            console.log(districts);
+            
+            //creo la scala, i cui estremi sono le variazioni % massime e minime delle morti al giorno in un comune nel 2020        
+            let extent = d3.extent(data, d=>Number(d.delta));
+           // console.log(extent);
+  
+            let colorScale = d3.scaleDiverging(d3.interpolate("green", "red"))
+                .domain(domain)
+                .clamp(true)
+
+            //creo la proiezione e il geopath e disegno la mappa
+            let projection = d3.geoMercator()
+                .scale(2500)
+                .translate([0, 2400])           
+
+            let path = d3.geoPath()
+                .projection(projection);
+
+            let districtsShapes = body.selectAll("path")
+                .data(districts)
+                .enter()
+                .append("path")
+                .attr("d", d=>path(d))
+                .on("mouseenter", function(d) {
+                    this.style.stroke = "#000";
+                    this.style.strokeWidth = 1.5;
+                    showTooltip(
+                        [d.properties.COMUNE, currentDay, d.properties.d_2020[currentDay], d.properties.avg_d[currentDay], d.properties.var[currentDay]], 
+                        [d3.event.clientX, d3.event.clientY]
+                    )
+                    })
+                .on("mousemouve", (d) => {
+                    showTooltip(
+                        [d.properties.COMUNE, currentDay, d.properties.d_2020[currentDay], d.properties.avg_d[currentDay], d.properties.var[currentDay]], 
+                        [d3.event.clientX, d3.event.clientY]
+                    )
+                    })
+                .on("mouseleave", function(d) {
+                    this.style.strokeWidth = 0;
+                    d3.select("#tooltip").style("display", "none");
+                    })
+                
+            
+            function changeMap(day){
+                /*districtsShapes.attr("fill", d => d.properties.var ? 
+                    colorScale(d.properties.var[day]) : "white")*/
+                districtsShapes.attr("fill", (d) => {
+                    if(d.properties.var){
+                        if (isNaN(d.properties.var[day])){
+                            return "red";
+                    }
+                    else {
+                        return colorScale(d.properties.var[day])
+                        
+                    }
+                }});
+                currentDay = day;
+                d3.select("#dayBox").text(formatDate(day));
+            }
+            
+            function timeout () {
+                setTimeout(function () {
+                    //il contatore viene incrementato; se ha raggiunto l'ultimo giorno la funzione si stoppa, altrimenti viene rinvocata
+                    if (exec==dayList.length || stop){
+                        return
+                    }
+                    changeMap(dayList[exec]);
+                    exec++;
+                    timeout();
+                    }, 500);
+            }
+
+            let margin = {left: 0.5, top: 20};
+            createLegend(domain, [0,450], [0.5, 20], [20, 40], colorScale);
+            changeMap(dayList[0])
+            timeout()
+        }
+
+        function formatDate(date){
+            return String(date%100)+"/"+String(Math.floor(date/100))+"/2020";
+        }
+
+        function showTooltip(text, coords){
+            let info = "comune: "+ text[0] +"\n\ndata: "+ formatDate(text[1]) +"\n\n\decessi: "+text[2]+"\n\n\media decessi: "+text[3]+"\n\nvariazione decessi: "+text[4]+"%";
+            document.getElementById("tooltip").innerHTML=info;
+            d3.select("#tooltip").text(info)
+                .style("top", coords[1]+"px")
+                .style("left", coords[0]+"px")
+                .style("display", "block")
+        }
+        
+        function createLegend(domain, range, dim, pos, colorScale){
+            d3.select("#legend").append("text")
+                .text("Variazione decessi %")
+                .attr("transform", `translate(${pos[0]}, ${pos[0]*1.5} )`);
+            let axisScale = d3.scaleLinear()//testare diverging
+                .domain([domain[0], domain[2]])
+                .range(range);
+            let axis = d3.axisBottom()
+                .scale(axisScale)
+                .ticks(10)
+
+            d3.select("#legendAxis")
+                .attr("transform", `translate(${pos[0]}, ${pos[1]+dim[1]} )`)
+                .call(axis)
+            let interval = d3.range(domain[0], domain[2]);
+
+            for(let i of interval){
+                d3.select("#legend").append("rect")
+                    .attr("width", dim[0])
+                    .attr("height", dim[1])
+                    .attr("x", pos[0])
+                    .attr("y", pos[1])
+                    .attr("fill", colorScale(i))
+                pos[0]+=0.5;
+            }
+        }
+    </script>
+</html>
